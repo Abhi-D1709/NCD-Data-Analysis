@@ -352,7 +352,7 @@ def build_workbook_bytes(df, top_n, exceptions):
     ws2["A3"].font = Font(name="Arial", size=8, italic=True, color="808080")
 
     headers = ["Rank", "Issuer", "Type of Issuer", "Industry of Issuer",
-               "No. of Issuances", "Amount Raised (Rs. Crores)", "% of Total"]
+               "No. of ISINs", "Amount Raised (Rs. Crores)", "% of Total"]
     hdr_row = 5
     for j, h in enumerate(headers, 1):
         c = ws2.cell(row=hdr_row, column=j, value=h)
