@@ -289,6 +289,19 @@ def run_pipeline(df, progress_cb=None):
 # --------------------------------------------------------------------------
 # Excel output (writes to a BytesIO stream for the download button)
 # --------------------------------------------------------------------------
+def unique_issuer_ratings(series):
+    """Aggregate an issuer's per-ISIN rating strings into a deduplicated
+    'Agency: Grade' list (outlooks stripped so they don't create near-dupes)."""
+    seen, out = set(), []
+    for s in series.dropna():
+        for part in str(s).split(";"):
+            p = re.sub(r"\s*\([^)]*\)\s*$", "", part.strip())
+            p = re.sub(r"\s+", " ", p)      # NSDL spacing variants ('AA+' vs 'AA +')
+            if p and p not in seen:
+                seen.add(p)
+                out.append(p)
+    return "; ".join(out)
+
 def build_workbook_bytes(df, top_n, exceptions):
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
@@ -345,14 +358,19 @@ def build_workbook_bytes(df, top_n, exceptions):
     ws2 = wb.create_sheet("Top_50_Issuers")
     ws2["A1"] = "Top 50 Issuers by Amount Raised"
     ws2["A1"].font = Font(name="Arial", size=13, bold=True, color="1F4E79")
-    ws2["A3"] = ("Note: All figures are live formulas against the Enriched_Data sheet. "
-                 "Counts/amounts use COUNTIFS/SUMIFS on 'Clean Issuer Name' (amounts include "
-                 "re-issues). Type and Industry are INDEX/MATCH lookups returning the issuer's "
-                 "first occurrence; blank = not populated in NSDL's records.")
+    ws2["A3"] = ("Note: Counts, amounts, Type and Industry are live formulas against the "
+                 "Enriched_Data sheet (COUNTIFS/SUMIFS and INDEX/MATCH first-occurrence on "
+                 "'Clean Issuer Name'; amounts include re-issues; blank = not populated in "
+                 "NSDL's records). Credit Rating(s) is the deduplicated set of Agency: Grade "
+                 "pairs across all the issuer's ISINs (outlooks omitted), computed at generation.")
     ws2["A3"].font = Font(name="Arial", size=8, italic=True, color="808080")
 
+    ratings_map = (df.groupby("Clean Issuer Name")["Credit Rating(s)"]
+                     .apply(unique_issuer_ratings).to_dict())
+
     headers = ["Rank", "Issuer", "Type of Issuer", "Industry of Issuer",
-               "No. of ISINs", "Amount Raised (Rs. Crores)", "% of Total"]
+               "Credit Rating(s)", "No. of Issuances",
+               "Amount Raised (Rs. Crores)", "% of Total"]
     hdr_row = 5
     for j, h in enumerate(headers, 1):
         c = ws2.cell(row=hdr_row, column=j, value=h)
@@ -375,32 +393,34 @@ def build_workbook_bytes(df, top_n, exceptions):
         ws2.cell(row=r, column=4,
                  value=(f'=IFERROR(IF(INDEX({ind_range},MATCH($B{r},{data_range},0))="","",'
                         f'INDEX({ind_range},MATCH($B{r},{data_range},0))),"")'))
-        ws2.cell(row=r, column=5, value=f'=COUNTIFS({data_range},$B{r})')
-        ws2.cell(row=r, column=6, value=f'=SUMIFS({amt_range},{data_range},$B{r})')
-        ws2.cell(row=r, column=7, value=f'=F{r}/SUM({amt_range})')
-        for j in range(1, 8):
+        rc = ws2.cell(row=r, column=5, value=ratings_map.get(issuer, ""))
+        rc.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        ws2.cell(row=r, column=6, value=f'=COUNTIFS({data_range},$B{r})')
+        ws2.cell(row=r, column=7, value=f'=SUMIFS({amt_range},{data_range},$B{r})')
+        ws2.cell(row=r, column=8, value=f'=G{r}/SUM({amt_range})')
+        for j in range(1, 9):
             c = ws2.cell(row=r, column=j)
             c.font, c.border = BODY_FONT, BORDER
             if i % 2 == 1:
                 c.fill = ALT_FILL
         ws2.cell(row=r, column=1).alignment = CENTER
         ws2.cell(row=r, column=3).alignment = CENTER
-        ws2.cell(row=r, column=5).alignment = CENTER
-        ws2.cell(row=r, column=6).number_format = "#,##0.00"
-        ws2.cell(row=r, column=7).number_format = "0.0%"
+        ws2.cell(row=r, column=6).alignment = CENTER
+        ws2.cell(row=r, column=7).number_format = "#,##0.00"
+        ws2.cell(row=r, column=8).number_format = "0.0%"
 
     tr = last_data + 1
     ws2.cell(row=tr, column=2, value=f"Total (Top {len(top_n)})")
-    ws2.cell(row=tr, column=5, value=f"=SUM(E{first_data}:E{last_data})")
     ws2.cell(row=tr, column=6, value=f"=SUM(F{first_data}:F{last_data})")
     ws2.cell(row=tr, column=7, value=f"=SUM(G{first_data}:G{last_data})")
-    for j in range(1, 8):
+    ws2.cell(row=tr, column=8, value=f"=SUM(H{first_data}:H{last_data})")
+    for j in range(1, 9):
         c = ws2.cell(row=tr, column=j)
         c.font = Font(name="Arial", size=10, bold=True)
         c.border = Border(top=Side(style="double"), bottom=THIN, left=THIN, right=THIN)
-    ws2.cell(row=tr, column=6).number_format = "#,##0.00"
-    ws2.cell(row=tr, column=7).number_format = "0.0%"
-    for j, w in zip(range(1, 8), [7, 50, 14, 36, 15, 22, 10]):
+    ws2.cell(row=tr, column=7).number_format = "#,##0.00"
+    ws2.cell(row=tr, column=8).number_format = "0.0%"
+    for j, w in zip(range(1, 9), [7, 46, 14, 32, 42, 15, 22, 10]):
         ws2.column_dimensions[get_column_letter(j)].width = w
     ws2.freeze_panes = f"A{first_data}"
 
@@ -496,6 +516,7 @@ def main():
         top_df = (df_out.groupby("Clean Issuer Name")
                   .agg(Type_of_Issuer=("Type of Issuer", "first"),
                        Industry=("Industry of Issuer", "first"),
+                       Credit_Ratings=("Credit Rating(s)", unique_issuer_ratings),
                        Issuances=(amt_col, "size"),
                        Amount_Rs_Crores=(amt_col, "sum"))
                   .sort_values("Amount_Rs_Crores", ascending=False).head(50)
