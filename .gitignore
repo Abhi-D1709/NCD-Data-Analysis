@@ -1,0 +1,30 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ---- IDE / OS noise ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- App inputs & outputs (data files don't belong in the repo) ----
+*.xlsx
+*.xls
+~$*.xlsx
+
+# ---- Streamlit local config & secrets ----
+.streamlit/secrets.toml
+
+# ---- Logs / scratch ----
+*.log
+*.tmp
+
+# NOTE: nsdl_cache.json is deliberately NOT ignored - committing it seeds
+# the deployed app with already-fetched NSDL responses (public data, no secrets).
+# If you'd rather keep the repo lean, add the line:  nsdl_cache.json
