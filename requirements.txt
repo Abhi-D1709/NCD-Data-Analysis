@@ -2,3 +2,5 @@ streamlit>=1.35
 pandas>=2.0
 requests>=2.31
 openpyxl>=3.1
+altair>=5.0
+certifi>=2024.2.2
