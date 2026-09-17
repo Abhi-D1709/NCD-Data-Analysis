@@ -18,7 +18,8 @@ derived from the ISIN via NSDL.
 
 Output workbook:
     1. Enriched_Data   - deduplicated rows + exchange flag + NSDL enrichment
-    2. Summary         - totals by exchange, issue type, rating, industry
+    2. Summary         - formula-driven totals by exchange, issue type, rating,
+                         issuer type, industry, day and top issuers
     3. Charts          - native Excel charts built on the Summary figures
     4. Top_50_Issuers  - ranked by amount raised (live COUNTIFS/SUMIFS formulas)
     5. Reconciliation  - what the dedup removed and any cross-file conflicts
@@ -751,8 +752,8 @@ def consolidate(bse, nse, common):
 OUTPUT_ORDER = [COL_NAME, COL_ISIN, COL_DATE, COL_AMT, "Exchange",
                 "Type of Issue", "Rate of Interest", "Original Allotment Date",
                 "Maturity Date", "Type of Issuer", "Industry of Issuer",
-                "Credit Rating(s)", "Category of Instrument", "Clean Issuer Name",
-                "Data Notes"]
+                "Credit Rating(s)", "Best Rating", "Category of Instrument",
+                "Clean Issuer Name", "Data Notes"]
 
 
 def run_pipeline(frames, progress_cb=None):
@@ -822,6 +823,10 @@ def run_pipeline(frames, progress_cb=None):
     df["Type of Issuer"] = col("type_of_issuer")
     df["Industry of Issuer"] = col("industry")
     df["Credit Rating(s)"] = col("ratings")
+    # The strongest grade across agencies. Stored as its own column because the
+    # Summary counts it with COUNTIFS - parsing "CRISIL: AAA (Stable); ..." is
+    # not something a worksheet formula can do reliably.
+    df["Best Rating"] = df["Credit Rating(s)"].map(best_grade)
     df["Category of Instrument"] = col("category")
     df["Rate of Interest"] = col("coupon")
     df["Original Allotment Date"] = pd.to_datetime(col("allotment"), errors="coerce")
@@ -867,8 +872,7 @@ def build_summary(df):
     out["Industry of Issuer"] = by("Industry of Issuer")
     out["Type of Issuer"] = by("Type of Issuer")
 
-    grades = df["Credit Rating(s)"].map(best_grade)
-    gdf = df.assign(Grade=grades.fillna("Unrated"))
+    gdf = df.assign(Grade=df["Best Rating"].fillna("Unrated"))
     g = (gdf.groupby("Grade").agg(Issuances=(COL_ISIN, "size"), Amount=(COL_AMT, "sum"))
          .reset_index())
     g["_ord"] = g["Grade"].map(lambda x: GRADE_ORDER.index(x) if x in GRADE_ORDER else 99)
@@ -1049,22 +1053,44 @@ def build_workbook_bytes(df, top_n, exceptions, audit, summary):
     ws_s = wb.create_sheet("Summary")
     ws_s["A1"] = "NCD Listings - Summary"
     ws_s["A1"].font = TITLE_FONT
-    ws_s["A2"] = (f"{len(df):,} listings | Rs. {df[COL_AMT].sum():,.2f} crores | "
-                  f"{df['Clean Issuer Name'].nunique():,} issuers | "
-                  f"generated {datetime.now():%d-%m-%Y %H:%M}")
+    # Every figure on this sheet is a formula over Enriched_Data, so filling in
+    # a blank Type of Issuer (or correcting any value) there flows straight
+    # through to these totals and to the Charts sheet built on them. Whole-
+    # column references keep rows appended below the data in scope; the
+    # ISIN "<>" condition stops the empty rows beneath from counting as blanks.
+    def data_col(name):
+        return f"Enriched_Data!${get_column_letter(list(df.columns).index(name) + 1)}:$" \
+               f"{get_column_letter(list(df.columns).index(name) + 1)}"
+
+    isin_rng, amt_rng = data_col(COL_ISIN), data_col(COL_AMT)
+    name_rng = data_col("Clean Issuer Name")
+    ws_s["A2"] = (f'=TEXT(COUNTA({isin_rng})-1,"#,##0")&" listings | Rs. "'
+                  f'&TEXT(SUM({amt_rng}),"#,##0.00")&" crores | "'
+                  f'&TEXT(SUMPRODUCT(({name_rng}<>"")/COUNTIF({name_rng},{name_rng}&""))-1,"#,##0")'
+                  f'&" issuers | generated {datetime.now():%d-%m-%Y %H:%M}"')
     ws_s["A2"].font = Font(name="Arial", size=9, italic=True, color="808080")
 
-    # (title, table) in display order. The last two exist mainly to feed the
-    # Charts sheet, which references these cells rather than holding its own copy.
-    tables = [(t, summary[t]) for t in ["Exchange", "Type of Issue",
-                                        "Credit Rating", "Type of Issuer",
-                                        "Industry of Issuer"]]
-    tables += [("Daily Listing Activity", summary["Daily"]),
-               ("Top 15 Issuers", summary["Issuers"].head(15))]
+    # title -> (table of starting categories, Enriched_Data column it counts,
+    #           label used for blank cells or None, extra categories to always list)
+    specs = [
+        ("Exchange", summary["Exchange"], "Exchange", None, []),
+        ("Type of Issue", summary["Type of Issue"], "Type of Issue", "Not reported",
+         ["New Issue", "Re-Issue"]),
+        ("Credit Rating", summary["Credit Rating"], "Best Rating", "Unrated", []),
+        ("Type of Issuer", summary["Type of Issuer"], "Type of Issuer", "Not reported",
+         ["Non PSU", "Public Sector Undertaking (PSU)"]),
+        ("Industry of Issuer", summary["Industry of Issuer"], "Industry of Issuer",
+         "Not reported", []),
+        ("Daily Listing Activity", summary["Daily"], COL_DATE, None, []),
+        ("Top 15 Issuers", summary["Issuers"].head(15), "Clean Issuer Name", None, []),
+    ]
     positions = {}                       # title -> (header row, first data row, last data row)
+    ITALIC = Font(name="Arial", size=10, italic=True, color="808080")
+    BOLD = Font(name="Arial", size=10, bold=True)
 
     row = 4
-    for title, tbl in tables:
+    for title, tbl, field, blank_label, always in specs:
+        rng = data_col(field)
         ws_s.cell(row=row, column=1, value=title).font = Font(
             name="Arial", size=11, bold=True, color="1F4E79")
         row += 1
@@ -1074,19 +1100,55 @@ def build_workbook_bytes(df, top_n, exceptions, audit, summary):
             c = ws_s.cell(row=row, column=j, value=label)
             c.font, c.fill, c.border, c.alignment = HDR_FONT, HDR_FILL, BORDER, CENTER
         row += 1
-        for _, r in tbl.iterrows():
-            for j, v in enumerate(r, 1):
-                c = ws_s.cell(row=row, column=j, value=_cellval(v))
+
+        cats = [v for v in tbl.iloc[:, 0].tolist() if v != blank_label]
+        cats += [a for a in always if a not in cats]
+        if blank_label:
+            cats.append(blank_label)     # always last, so it's easy to watch shrink
+        first = row
+        for cat in cats:
+            is_blank = blank_label is not None and cat == blank_label
+            crit = '""' if is_blank else f"$A{row}"
+            label = cat.to_pydatetime() if isinstance(cat, pd.Timestamp) else cat
+            if isinstance(label, date) and not isinstance(label, datetime):
+                label = datetime(label.year, label.month, label.day)
+            ws_s.cell(row=row, column=1, value=label)
+            ws_s.cell(row=row, column=2,
+                      value=f'=COUNTIFS({isin_rng},"<>",{rng},{crit})')
+            ws_s.cell(row=row, column=3,
+                      value=f'=SUMIFS({amt_rng},{isin_rng},"<>",{rng},{crit})')
+            for j in range(1, 4):
+                c = ws_s.cell(row=row, column=j)
                 c.font, c.border = BODY_FONT, BORDER
-                if j == 3:
-                    c.number_format = "#,##0.00"
-                elif j == 2:
-                    c.alignment = CENTER
-                elif isinstance(c.value, (date, datetime)):
-                    c.number_format = "DD-MM-YYYY"
-                    c.alignment = LEFT
+            ws_s.cell(row=row, column=2).alignment = CENTER
+            ws_s.cell(row=row, column=3).number_format = "#,##0.00"
+            if isinstance(label, datetime):
+                ws_s.cell(row=row, column=1).number_format = "DD-MM-YYYY"
+                ws_s.cell(row=row, column=1).alignment = LEFT
             row += 1
-        positions[title] = (hdr, hdr + 1, row - 1)
+        last = row - 1
+        positions[title] = (hdr, first, last)
+
+        if title not in ("Daily Listing Activity", "Top 15 Issuers"):
+            # Anything typed into Enriched_Data that isn't one of the rows above
+            # lands here instead of silently vanishing from the totals.
+            ws_s.cell(row=row, column=1, value="Other (not listed above)").font = ITALIC
+            ws_s.cell(row=row, column=2,
+                      value=f'=COUNTA({isin_rng})-1-SUM(B{first}:B{last})').font = ITALIC
+            ws_s.cell(row=row, column=3,
+                      value=f'=SUM({amt_rng})-SUM(C{first}:C{last})').font = ITALIC
+            ws_s.cell(row=row, column=2).alignment = CENTER
+            ws_s.cell(row=row, column=3).number_format = "#,##0.00"
+            row += 1
+            ws_s.cell(row=row, column=1, value="Total").font = BOLD
+            ws_s.cell(row=row, column=2, value=f"=SUM(B{first}:B{row - 1})").font = BOLD
+            ws_s.cell(row=row, column=3, value=f"=SUM(C{first}:C{row - 1})").font = BOLD
+            ws_s.cell(row=row, column=2).alignment = CENTER
+            ws_s.cell(row=row, column=3).number_format = "#,##0.00"
+            for j in range(1, 4):
+                ws_s.cell(row=row, column=j).border = Border(
+                    top=Side(style="thin"), bottom=Side(style="double"))
+            row += 1
         row += 1
     for j, w in zip(range(1, 4), [40, 14, 24]):
         ws_s.column_dimensions[get_column_letter(j)].width = w
@@ -1205,6 +1267,11 @@ def build_workbook_bytes(df, top_n, exceptions, audit, summary):
             c.font, c.border = BODY_FONT, BORDER
     for j, w in zip(range(1, 4), [16, 50, 30]):
         ws3.column_dimensions[get_column_letter(j)].width = w
+
+    # openpyxl writes formulas without cached results; force a full recalc on
+    # open so the Summary, Charts and Top 50 all show numbers immediately.
+    from openpyxl.workbook.properties import CalcProperties
+    wb.calculation = CalcProperties(fullCalcOnLoad=True)
 
     buf = io.BytesIO()
     wb.save(buf)

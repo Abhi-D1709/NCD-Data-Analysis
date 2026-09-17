@@ -64,8 +64,12 @@ logged on the `Reconciliation` sheet.
 ## Output workbook
 
 1. `Enriched_Data` - one row per listing, enriched
-2. `Summary` - totals by exchange, issue type, rating, issuer type,
-   industry, daily activity and top 15 issuers
+2. `Summary` - COUNTIFS/SUMIFS formulas over `Enriched_Data` by exchange,
+   issue type, rating, issuer type, industry, day and top 15 issuers. Edit
+   `Enriched_Data` (e.g. fill a blank Type of Issuer) and the Summary and Charts
+   follow. Each breakdown ends with an *Other* row, which picks up any value you
+   type that isn't already listed, and a *Total*. The rating breakdown counts the
+   `Best Rating` column, so edit that column when changing a rating.
 3. `Charts` - native, editable Excel charts mirroring the dashboard, drawn from
    the Summary figures
 4. `Top_50_Issuers` - live COUNTIFS/SUMIFS formulas against sheet 1
